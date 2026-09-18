@@ -80,20 +80,21 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
     meta: [
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
-      { title: "PRAGATI · Disaster Response & Coordination" },
+      { title: "PRAGATI | Disaster Response & Coordination" },
       {
         name: "description",
         content:
           "PRAGATI prototype: unified disaster intelligence, safe hospital routing and coordinated emergency response. Simulated data.",
       },
       { name: "author", content: "PRAGATI Prototype Team" },
-      { property: "og:title", content: "PRAGATI · Disaster Response & Coordination" },
+      { property: "og:title", content: "PRAGATI | Disaster Response & Coordination" },
       {
         property: "og:description",
         content: "One Disaster. One Map. One Coordinated Response. Phase 1 prototype with simulated data.",
       },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
+      { name: "theme-color", content: "#071827" },
     ],
     links: [
       {
@@ -106,7 +107,9 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
         rel: "stylesheet",
         href: "https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap",
       },
-      { rel: "icon", href: "/favicon.ico", type: "image/x-icon" },
+      { rel: "icon", href: "/favicon.svg", type: "image/svg+xml" },
+      { rel: "apple-touch-icon", href: "/apple-touch-icon.svg" },
+      { rel: "manifest", href: "/manifest.webmanifest" },
     ],
   }),
   shellComponent: RootShell,
