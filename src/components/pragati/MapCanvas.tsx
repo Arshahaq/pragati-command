@@ -1,29 +1,24 @@
-import { useMemo, useState } from "react";
-import { cn } from "@/lib/utils";
-import { usePragati } from "@/lib/pragati/store";
-import type { GeoPoint, RouteOption } from "@/lib/pragati/types";
-import { StatusPill, PrototypeTag, timeAgo } from "./primitives";
+import { useEffect, useState } from "react";
+import "leaflet/dist/leaflet.css";
 import {
   Ambulance,
   Building2,
   Flame,
   Layers,
+  LocateFixed,
+  Maximize2,
+  RotateCcw,
   ShieldAlert,
   Tent,
   TriangleAlert,
   Users,
 } from "lucide-react";
 
-const BOUNDS = { west: 77.555, east: 77.725, north: 13.045, south: 12.885 };
-const W = 1000;
-const H = 640;
-
-export function project(p: GeoPoint) {
-  return {
-    x: ((p.lng - BOUNDS.west) / (BOUNDS.east - BOUNDS.west)) * W,
-    y: ((BOUNDS.north - p.lat) / (BOUNDS.north - BOUNDS.south)) * H,
-  };
-}
+import { CITIZEN_LOCATION } from "@/lib/pragati/seed";
+import { usePragati } from "@/lib/pragati/store";
+import type { GeoPoint, RouteOption } from "@/lib/pragati/types";
+import { cn } from "@/lib/utils";
+import { PrototypeTag, StatusPill, timeAgo } from "./primitives";
 
 export type MapSelection =
   | { kind: "incident"; id: string }
@@ -34,7 +29,7 @@ export type MapSelection =
   | { kind: "zone"; id: string }
   | null;
 
-interface Layers {
+interface LayersConfig {
   zones: boolean;
   incidents: boolean;
   hospitals: boolean;
@@ -43,11 +38,20 @@ interface Layers {
   roads: boolean;
 }
 
-const roadStroke = {
-  clear: "var(--color-grid)",
-  flood_affected: "var(--color-warning)",
-  closed: "var(--color-critical)",
-} as const;
+const DEFAULT_CENTER: GeoPoint = { lat: 12.9716, lng: 77.5946 };
+
+function colorForRoadStatus(status: string): string {
+  switch (status) {
+    case "clear":
+      return "#22c55e";
+    case "flood_affected":
+      return "#f59e0b";
+    case "closed":
+      return "#ef4444";
+    default:
+      return "#60a5fa";
+  }
+}
 
 export function MapCanvas({
   className,
@@ -65,14 +69,9 @@ export function MapCanvas({
   selection?: MapSelection | undefined;
 }) {
   const { state } = usePragati();
-  const [internal, setInternal] = useState<MapSelection>(null);
-  const selection = controlledSelection !== undefined ? controlledSelection : internal;
-  const select = (next: MapSelection) => {
-    if (controlledSelection === undefined) setInternal(next);
-    onSelect?.(next);
-  };
-
-  const [layers, setLayers] = useState<Layers>({
+  const [internalSelection, setInternalSelection] = useState<MapSelection>(null);
+  const selection = controlledSelection ?? internalSelection;
+  const [layers, setLayers] = useState<LayersConfig>({
     zones: true,
     incidents: true,
     hospitals: true,
@@ -80,18 +79,75 @@ export function MapCanvas({
     relief: true,
     roads: true,
   });
+  const [userLocation, setUserLocation] = useState<GeoPoint | null>(origin ?? CITIZEN_LOCATION);
+  const [leaflet, setLeaflet] = useState<typeof import("react-leaflet") | null>(null);
 
-  const gridLines = useMemo(() => {
-    const v = Array.from({ length: 11 }, (_, i) => (i * W) / 10);
-    const h = Array.from({ length: 7 }, (_, i) => (i * H) / 6);
-    return { v, h };
+  useEffect(() => {
+    let active = true;
+
+    Promise.all([import("leaflet"), import("react-leaflet")])
+      .then(([leafletLib, reactLeafletLib]) => {
+        if (!active) return;
+        if (typeof window !== "undefined" && leafletLib.Icon.Default) {
+          leafletLib.Icon.Default.mergeOptions({
+            iconRetinaUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png",
+            iconUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png",
+            shadowUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
+          });
+        }
+        setLeaflet(reactLeafletLib);
+      })
+      .catch(() => {
+        if (active) setLeaflet(null);
+      });
+
+    return () => {
+      active = false;
+    };
   }, []);
 
+  const select = (next: MapSelection) => {
+    if (controlledSelection === undefined) setInternalSelection(next);
+    onSelect?.(next);
+  };
+
+  const handleUseMyLocation = () => {
+    if (typeof navigator === "undefined" || !navigator.geolocation) {
+      setUserLocation(origin ?? CITIZEN_LOCATION);
+      return;
+    }
+
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        setUserLocation({
+          lat: position.coords.latitude,
+          lng: position.coords.longitude,
+        });
+      },
+      () => {
+        setUserLocation(origin ?? CITIZEN_LOCATION);
+      },
+      { enableHighAccuracy: true, timeout: 5000 },
+    );
+  };
+
   const detail = useDetail(selection);
+  const effectiveOrigin = origin ?? userLocation ?? CITIZEN_LOCATION;
+
+  if (!leaflet) {
+    return (
+      <div className={cn("panel relative flex min-h-[420px] items-center justify-center overflow-hidden", className)}>
+        <div className="text-center text-sm text-muted-foreground">Loading Bengaluru map...</div>
+      </div>
+    );
+  }
+
+  const { MapContainer, TileLayer, Circle, CircleMarker, Polyline, Tooltip, useMap } = leaflet;
+  const incidentPoints = state.incidents.filter((incident) => incident.status !== "resolved").map((incident) => incident.location);
 
   return (
     <div className={cn("panel relative overflow-hidden", className)}>
-      <div className="absolute left-4 top-4 z-20 flex flex-wrap items-center gap-2">
+      <div className="absolute left-4 top-4 z-[500] flex flex-wrap items-center gap-2">
         <PrototypeTag />
         <StatusPill tone={state.scenarioActive ? "critical" : "safe"}>
           {state.scenarioActive ? `${state.scenarioName} scenario active` : "Baseline monitoring"}
@@ -99,17 +155,20 @@ export function MapCanvas({
       </div>
 
       {!compact && (
-        <div className="panel-glass absolute right-4 top-4 z-20 w-44 p-3">
+        <div className="panel-glass absolute right-4 top-4 z-[500] w-44 p-3">
           <p className="label-eyebrow mb-2 flex items-center gap-1.5">
             <Layers className="size-3" /> Map layers
           </p>
           <div className="space-y-1.5">
-            {(Object.keys(layers) as (keyof Layers)[]).map((key) => (
-              <label key={key} className="flex cursor-pointer items-center gap-2 text-xs capitalize text-muted-foreground hover:text-foreground">
+            {(Object.keys(layers) as (keyof LayersConfig)[]).map((key) => (
+              <label
+                key={key}
+                className="flex cursor-pointer items-center gap-2 text-xs capitalize text-muted-foreground hover:text-foreground"
+              >
                 <input
                   type="checkbox"
                   checked={layers[key]}
-                  onChange={(e) => setLayers((l) => ({ ...l, [key]: e.target.checked }))}
+                  onChange={(event) => setLayers((previous) => ({ ...previous, [key]: event.target.checked }))}
                   className="size-3.5 accent-[var(--color-primary)]"
                 />
                 {key}
@@ -119,205 +178,211 @@ export function MapCanvas({
         </div>
       )}
 
-      <svg
-        viewBox={`0 0 ${W} ${H}`}
+      <div className="absolute right-4 top-20 z-[500]">
+        <button
+          type="button"
+          onClick={handleUseMyLocation}
+          className="panel-glass inline-flex items-center gap-2 rounded-md border border-border px-3 py-2 text-xs font-medium text-foreground shadow-sm transition hover:border-primary/60 hover:text-primary"
+        >
+          <LocateFixed className="size-3.5" /> Use My Location
+        </button>
+      </div>
+
+      <MapContainer
+        center={[DEFAULT_CENTER.lat, DEFAULT_CENTER.lng]}
+        zoom={12}
+        scrollWheelZoom
+        zoomAnimation={false}
+        fadeAnimation={false}
+        markerZoomAnimation={false}
         className="h-full w-full"
-        style={{ background: "var(--color-surface-2)", minHeight: compact ? 280 : 460 }}
-        role="img"
-        aria-label="Simulated Bengaluru disaster operations map"
+        style={{ minHeight: compact ? 280 : 520, background: "#08131d" }}
       >
-        <defs>
-          <radialGradient id="zoneFlood" cx="50%" cy="50%" r="50%">
-            <stop offset="0%" stopColor="var(--color-info)" stopOpacity="0.38" />
-            <stop offset="100%" stopColor="var(--color-info)" stopOpacity="0.02" />
-          </radialGradient>
-          <radialGradient id="zoneCritical" cx="50%" cy="50%" r="50%">
-            <stop offset="0%" stopColor="var(--color-critical)" stopOpacity="0.4" />
-            <stop offset="100%" stopColor="var(--color-critical)" stopOpacity="0.03" />
-          </radialGradient>
-        </defs>
-
-        {gridLines.v.map((x) => (
-          <line key={`v${x}`} x1={x} y1={0} x2={x} y2={H} stroke="var(--color-grid)" strokeWidth={0.6} />
-        ))}
-        {gridLines.h.map((y) => (
-          <line key={`h${y}`} x1={0} y1={y} x2={W} y2={y} stroke="var(--color-grid)" strokeWidth={0.6} />
-        ))}
-
-        {/* Simulated water bodies for orientation */}
-        <ellipse cx={745} cy={430} rx={70} ry={34} fill="var(--color-info)" opacity={0.16} />
-        <text x={745} y={434} textAnchor="middle" className="fill-muted-foreground" fontSize={11}>
-          Bellandur Lake
-        </text>
-        <ellipse cx={318} cy={214} rx={44} ry={22} fill="var(--color-info)" opacity={0.14} />
+        <MapControls useMap={useMap} origin={effectiveOrigin} incidentPoints={incidentPoints} />
+        <TileLayer
+          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+        />
 
         {layers.zones &&
-          state.zones.map((zone) => {
-            const c = project(zone.center);
-            const r = (zone.radiusKm / 18.5) * W;
-            const critical = zone.risk === "critical" || zone.risk === "high";
-            return (
-              <g key={zone.id} onClick={() => select({ kind: "zone", id: zone.id })} className="cursor-pointer">
-                <circle cx={c.x} cy={c.y} r={r} fill={critical ? "url(#zoneCritical)" : "url(#zoneFlood)"} />
-                <circle
-                  cx={c.x}
-                  cy={c.y}
-                  r={r}
-                  fill="none"
-                  strokeDasharray="6 5"
-                  strokeWidth={1.4}
-                  stroke={critical ? "var(--color-critical)" : "var(--color-info)"}
-                  opacity={0.7}
-                />
-                <text x={c.x} y={c.y - r - 8} textAnchor="middle" fontSize={12} className="fill-foreground" opacity={0.85}>
-                  {zone.id} · {zone.risk} {zone.hazard}
-                </text>
-              </g>
-            );
-          })}
+          state.zones.map((zone) => (
+            <Circle
+              key={zone.id}
+              center={[zone.center.lat, zone.center.lng]}
+              radius={zone.radiusKm * 1000}
+              pathOptions={{
+                color: zone.risk === "high" || zone.risk === "critical" ? "#ef4444" : "#60a5fa",
+                fillColor: zone.risk === "high" || zone.risk === "critical" ? "#ef4444" : "#60a5fa",
+                fillOpacity: 0.15,
+                weight: 1.8,
+                dashArray: "6 6",
+              }}
+              eventHandlers={{ click: () => select({ kind: "zone", id: zone.id }) }}
+            >
+              <Tooltip direction="top" offset={[0, -10]} opacity={1}>
+                <div className="text-[11px] text-foreground">{zone.id}</div>
+              </Tooltip>
+            </Circle>
+          ))}
 
         {layers.roads &&
           state.roads.map((road) => {
-            const a = project(road.from);
-            const b = project(road.to);
             const active = selection?.kind === "road" && selection.id === road.id;
+
             return (
-              <g key={road.id} onClick={() => select({ kind: "road", id: road.id })} className="cursor-pointer">
-                <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="transparent" strokeWidth={16} />
-                <line
-                  x1={a.x}
-                  y1={a.y}
-                  x2={b.x}
-                  y2={b.y}
-                  stroke={roadStroke[road.status]}
-                  strokeWidth={road.status === "clear" ? 3.5 : 5}
-                  strokeLinecap="round"
-                  strokeDasharray={road.status === "closed" ? "10 7" : undefined}
-                  opacity={active ? 1 : road.status === "clear" ? 0.75 : 0.95}
-                />
-                {road.status !== "clear" && (
-                  <text
-                    x={(a.x + b.x) / 2}
-                    y={(a.y + b.y) / 2 - 8}
-                    textAnchor="middle"
-                    fontSize={10.5}
-                    fill={roadStroke[road.status]}
-                  >
-                    {road.id} {road.status === "closed" ? "CLOSED" : "FLOOD"}
-                  </text>
-                )}
-              </g>
+              <Polyline
+                key={road.id}
+                positions={[
+                  [road.from.lat, road.from.lng],
+                  [road.to.lat, road.to.lng],
+                ]}
+                pathOptions={{
+                  color: colorForRoadStatus(road.status),
+                  weight: active ? 7 : road.status === "clear" ? 4 : 6,
+                  opacity: road.status === "clear" ? 0.8 : 1,
+                  dashArray: road.status === "closed" ? "8 8" : undefined,
+                }}
+                eventHandlers={{ click: () => select({ kind: "road", id: road.id }) }}
+              >
+                <Tooltip direction="top" offset={[0, -10]} opacity={1}>
+                  <div className="text-[11px] text-foreground">{road.id} · {road.status}</div>
+                </Tooltip>
+              </Polyline>
             );
           })}
 
-        {routes?.map((route) => {
-          const d = route.path.map(project).map((p, i) => `${i === 0 ? "M" : "L"}${p.x} ${p.y}`).join(" ");
-          const color =
-            route.label === "Safest"
-              ? "var(--color-forest)"
-              : route.label === "Emergency"
-                ? "var(--color-saffron)"
-                : "var(--color-info)";
-          return (
-            <g key={route.id}>
-              <path d={d} fill="none" stroke={color} strokeWidth={route.recommended ? 6 : 3.5} opacity={route.recommended ? 0.95 : 0.55} strokeLinecap="round" />
-              {route.recommended && <path d={d} fill="none" stroke={color} strokeWidth={14} opacity={0.14} />}
-            </g>
-          );
-        })}
+        {routes?.map((route) => (
+          <Polyline
+            key={route.id}
+            positions={route.path.map((point) => [point.lat, point.lng])}
+            pathOptions={{
+              color:
+                route.routeStatus === "blocked"
+                  ? "#ef4444"
+                  : route.routeStatus === "high_risk"
+                    ? "#f97316"
+                    : route.routeStatus === "caution"
+                      ? "#f59e0b"
+                      : "#22c55e",
+              weight: route.recommended ? 7 : 5,
+              opacity: route.recommended ? 0.95 : 0.72,
+              dashArray: route.routeStatus === "blocked" ? "10 8" : undefined,
+            }}
+          />
+        ))}
 
-        {origin && <OriginMarker point={origin} />}
+        {effectiveOrigin && (
+          <CircleMarker
+            center={[effectiveOrigin.lat, effectiveOrigin.lng]}
+            radius={10}
+            pathOptions={{ color: "#4f46e5", fillColor: "#4f46e5", fillOpacity: 0.35, weight: 2 }}
+          >
+            <Tooltip direction="top" offset={[0, -12]} opacity={1}>
+              <div className="text-[11px] text-foreground">You</div>
+            </Tooltip>
+          </CircleMarker>
+        )}
 
         {layers.relief &&
-          state.reliefCenters.map((center) => {
-            const p = project(center.location);
-            return (
-              <g key={center.id} className="cursor-pointer" onClick={() => select({ kind: "relief", id: center.id })}>
-                <rect x={p.x - 8} y={p.y - 8} width={16} height={16} rx={4} fill="var(--color-forest)" stroke="var(--color-background)" strokeWidth={2} />
-                <text x={p.x} y={p.y + 22} textAnchor="middle" fontSize={10} className="fill-muted-foreground">
-                  {center.id}
-                </text>
-              </g>
-            );
-          })}
+          state.reliefCenters.map((center) => (
+            <CircleMarker
+              key={center.id}
+              center={[center.location.lat, center.location.lng]}
+              radius={9}
+              pathOptions={{ color: "#22c55e", fillColor: "#22c55e", fillOpacity: 1, weight: 2 }}
+              eventHandlers={{ click: () => select({ kind: "relief", id: center.id }) }}
+            >
+              <Tooltip direction="top" offset={[0, -8]} opacity={1}>
+                <div className="text-[11px] text-foreground">{center.id}</div>
+              </Tooltip>
+            </CircleMarker>
+          ))}
 
         {layers.hospitals &&
           state.hospitals.map((hospital) => {
-            const p = project(hospital.location);
             const tone =
               hospital.status === "offline"
-                ? "var(--color-critical)"
+                ? "#ef4444"
                 : hospital.accessAffected || hospital.status === "overloaded"
-                  ? "var(--color-warning)"
-                  : "var(--color-safe)";
+                  ? "#f59e0b"
+                  : "#22c55e";
+
             return (
-              <g key={hospital.id} className="cursor-pointer" onClick={() => select({ kind: "hospital", id: hospital.id })}>
-                <circle cx={p.x} cy={p.y} r={11} fill="var(--color-background)" stroke={tone} strokeWidth={2.5} />
-                <path d={`M${p.x - 5} ${p.y} H${p.x + 5} M${p.x} ${p.y - 5} V${p.y + 5}`} stroke={tone} strokeWidth={2.6} strokeLinecap="round" />
-                <text x={p.x} y={p.y - 16} textAnchor="middle" fontSize={10} className="fill-foreground" opacity={0.8}>
-                  {hospital.id}
-                </text>
-              </g>
+              <CircleMarker
+                key={hospital.id}
+                center={[hospital.location.lat, hospital.location.lng]}
+                radius={10}
+                pathOptions={{ color: tone, fillColor: "#ffffff", fillOpacity: 1, weight: 2.5 }}
+                eventHandlers={{ click: () => select({ kind: "hospital", id: hospital.id }) }}
+              >
+                <Tooltip direction="top" offset={[0, -8]} opacity={1}>
+                  <div className="text-[11px] text-foreground">{hospital.id}</div>
+                </Tooltip>
+              </CircleMarker>
             );
           })}
 
         {layers.resources &&
           state.resources
-            .filter((r) => r.status !== "offline")
+            .filter((resource) => resource.status !== "offline")
             .map((resource) => {
-              const p = project(resource.location);
               const tone =
                 resource.type === "Fire Truck"
-                  ? "var(--color-saffron)"
+                  ? "#f59e0b"
                   : resource.type === "Ambulance"
-                    ? "var(--color-info)"
+                    ? "#60a5fa"
                     : resource.type === "Police Unit"
-                      ? "var(--color-primary)"
-                      : "var(--color-forest)";
+                      ? "#8b5cf6"
+                      : "#22c55e";
+
               return (
-                <g key={resource.id} className="cursor-pointer" onClick={() => select({ kind: "resource", id: resource.id })}>
-                  <polygon
-                    points={`${p.x},${p.y - 7} ${p.x + 7},${p.y} ${p.x},${p.y + 7} ${p.x - 7},${p.y}`}
-                    fill={tone}
-                    stroke="var(--color-background)"
-                    strokeWidth={1.6}
-                    opacity={resource.status === "available" ? 1 : 0.65}
-                  />
-                  <text x={p.x} y={p.y + 19} textAnchor="middle" fontSize={9.5} className="fill-muted-foreground">
-                    {resource.id}
-                  </text>
-                </g>
+                <CircleMarker
+                  key={resource.id}
+                  center={[resource.location.lat, resource.location.lng]}
+                  radius={resource.type === "Rescue Team" ? 8 : 7}
+                  pathOptions={{ color: tone, fillColor: tone, fillOpacity: 0.9, weight: 1.5 }}
+                  eventHandlers={{ click: () => select({ kind: "resource", id: resource.id }) }}
+                >
+                  <Tooltip direction="top" offset={[0, -8]} opacity={1}>
+                    <div className="text-[11px] text-foreground">{resource.id}</div>
+                  </Tooltip>
+                </CircleMarker>
               );
             })}
 
         {layers.incidents &&
           state.incidents
-            .filter((i) => i.status !== "resolved")
+            .filter((incident) => incident.status !== "resolved")
             .map((incident) => {
-              const p = project(incident.location);
               const tone =
                 incident.severity === "critical"
-                  ? "var(--color-critical)"
+                  ? "#ef4444"
                   : incident.severity === "high"
-                    ? "var(--color-warning)"
-                    : "var(--color-saffron)";
+                    ? "#f59e0b"
+                    : "#fbbf24";
+
               const active = selection?.kind === "incident" && selection.id === incident.id;
+
               return (
-                <g key={incident.id} className="cursor-pointer" onClick={() => select({ kind: "incident", id: incident.id })}>
-                  {incident.severity === "critical" && (
-                    <circle cx={p.x} cy={p.y} r={9} fill={tone} opacity={0.5} className="marker-pulse" />
-                  )}
-                  <circle cx={p.x} cy={p.y} r={active ? 10 : 7.5} fill={tone} stroke="var(--color-background)" strokeWidth={2} />
-                  {active && <circle cx={p.x} cy={p.y} r={17} fill="none" stroke={tone} strokeWidth={1.5} />}
-                </g>
+                <CircleMarker
+                  key={incident.id}
+                  center={[incident.location.lat, incident.location.lng]}
+                  radius={active ? 10 : 8}
+                  pathOptions={{ color: tone, fillColor: tone, fillOpacity: 0.95, weight: 2 }}
+                  eventHandlers={{ click: () => select({ kind: "incident", id: incident.id }) }}
+                >
+                  <Tooltip direction="top" offset={[0, -10]} opacity={1}>
+                    <div className="text-[11px] text-foreground">{incident.id} · {incident.severity}</div>
+                  </Tooltip>
+                </CircleMarker>
               );
             })}
-      </svg>
+      </MapContainer>
 
       <Legend compact={compact} />
 
       {detail && (
-        <div className="panel-glass absolute bottom-4 left-4 z-20 w-[min(340px,calc(100%-2rem))] p-4">
+        <div className="panel-glass absolute bottom-4 left-4 z-[500] w-[min(340px,calc(100%-2rem))] p-4">
           <div className="flex items-start justify-between gap-2">
             <div>
               <p className="label-eyebrow">{detail.eyebrow}</p>
@@ -345,16 +410,28 @@ export function MapCanvas({
   );
 }
 
-function OriginMarker({ point }: { point: GeoPoint }) {
-  const p = project(point);
+function MapControls({
+  useMap,
+  origin,
+  incidentPoints,
+}: {
+  useMap: typeof import("react-leaflet").useMap;
+  origin: GeoPoint;
+  incidentPoints: GeoPoint[];
+}) {
+  const map = useMap();
   return (
-    <g>
-      <circle cx={p.x} cy={p.y} r={10} fill="var(--color-primary)" opacity={0.35} className="marker-pulse" />
-      <circle cx={p.x} cy={p.y} r={6} fill="var(--color-primary)" stroke="var(--color-background)" strokeWidth={2} />
-      <text x={p.x} y={p.y - 14} textAnchor="middle" fontSize={10.5} className="fill-foreground">
-        You
-      </text>
-    </g>
+    <div className="absolute left-4 top-20 z-[500] flex flex-col gap-1">
+      <button type="button" onClick={() => map.setView([origin.lat, origin.lng], 13)} className="panel-glass rounded-md border border-border p-2 text-muted-foreground hover:text-primary" title="Recenter on my location" aria-label="Recenter on my location">
+        <LocateFixed className="size-3.5" />
+      </button>
+      <button type="button" onClick={() => incidentPoints.length > 0 && map.fitBounds(incidentPoints.map((point) => [point.lat, point.lng] as [number, number]), { padding: [28, 28] })} className="panel-glass rounded-md border border-border p-2 text-muted-foreground hover:text-primary" title="Fit incidents" aria-label="Fit incidents">
+        <Maximize2 className="size-3.5" />
+      </button>
+      <button type="button" onClick={() => map.setView([DEFAULT_CENTER.lat, DEFAULT_CENTER.lng], 12)} className="panel-glass rounded-md border border-border p-2 text-muted-foreground hover:text-primary" title="Reset map view" aria-label="Reset map view">
+        <RotateCcw className="size-3.5" />
+      </button>
+    </div>
   );
 }
 
@@ -368,8 +445,14 @@ function Legend({ compact }: { compact?: boolean | undefined }) {
     { icon: <Tent className="size-3 text-forest" />, label: "Relief centre" },
     { icon: <Users className="size-3 text-warning" />, label: "Hazard zone" },
   ];
+
   return (
-    <div className={cn("panel-glass absolute bottom-4 right-4 z-10 flex flex-wrap gap-x-3 gap-y-1.5 p-2.5", compact && "hidden md:flex")}>
+    <div
+      className={cn(
+        "panel-glass absolute bottom-4 right-4 z-[450] flex flex-wrap gap-x-3 gap-y-1.5 p-2.5",
+        compact && "hidden md:flex",
+      )}
+    >
       {items.map((item) => (
         <span key={item.label} className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
           {item.icon}
@@ -385,95 +468,106 @@ function useDetail(selection: MapSelection) {
   if (!selection) return null;
 
   if (selection.kind === "incident") {
-    const i = state.incidents.find((x) => x.id === selection.id);
-    if (!i) return null;
+    const incident = state.incidents.find((item) => item.id === selection.id);
+    if (!incident) return null;
+
     return {
-      eyebrow: `Incident ${i.id}`,
-      title: i.type,
+      eyebrow: `Incident ${incident.id}`,
+      title: incident.type,
       rows: [
-        { label: "Severity", value: i.severity.toUpperCase() },
-        { label: "Location", value: i.area },
-        { label: "People affected", value: String(i.peopleAffected) },
-        { label: "Status", value: i.status.replace("_", " ") },
-        { label: "Assigned", value: i.assignedResourceId ?? "Awaiting response" },
-        { label: "Reported", value: timeAgo(i.reportedAt) },
+        { label: "Severity", value: incident.severity.toUpperCase() },
+        { label: "Location", value: incident.area },
+        { label: "People affected", value: String(incident.peopleAffected) },
+        { label: "Status", value: incident.status.replace("_", " ") },
+        { label: "Assigned", value: incident.assignedResourceId ?? "Awaiting response" },
+        { label: "Reported", value: timeAgo(incident.reportedAt) },
       ],
     };
   }
+
   if (selection.kind === "hospital") {
-    const h = state.hospitals.find((x) => x.id === selection.id);
-    if (!h) return null;
+    const hospital = state.hospitals.find((item) => item.id === selection.id);
+    if (!hospital) return null;
+
     return {
-      eyebrow: `Hospital ${h.id}`,
-      title: h.name,
+      eyebrow: `Hospital ${hospital.id}`,
+      title: hospital.name,
       rows: [
-        { label: "Status", value: h.status },
-        { label: "Emergency capacity", value: `${h.emergencyBeds.total - h.emergencyBeds.used} beds free` },
-        { label: "ICU", value: `${h.icu.used}/${h.icu.total}` },
-        { label: "Ambulances", value: `${h.ambulancesAvailable}/${h.ambulances}` },
-        { label: "Access road", value: h.accessAffected ? "Flood affected" : "Clear" },
-        { label: "Flood risk", value: h.floodRisk },
-        { label: "Updated", value: timeAgo(h.updatedAt) },
+        { label: "Status", value: hospital.status },
+        { label: "Emergency capacity", value: `${hospital.emergencyBeds.total - hospital.emergencyBeds.used} beds free` },
+        { label: "ICU", value: `${hospital.icu.used}/${hospital.icu.total}` },
+        { label: "Ambulances", value: `${hospital.ambulancesAvailable}/${hospital.ambulances}` },
+        { label: "Access road", value: hospital.accessAffected ? "Flood affected" : "Clear" },
+        { label: "Flood risk", value: hospital.floodRisk },
+        { label: "Updated", value: timeAgo(hospital.updatedAt) },
       ],
     };
   }
+
   if (selection.kind === "resource") {
-    const r = state.resources.find((x) => x.id === selection.id);
-    if (!r) return null;
+    const resource = state.resources.find((item) => item.id === selection.id);
+    if (!resource) return null;
+
     return {
-      eyebrow: `Resource ${r.id}`,
-      title: r.callSign,
+      eyebrow: `Resource ${resource.id}`,
+      title: resource.callSign,
       rows: [
-        { label: "Type", value: r.type },
-        { label: "Status", value: r.status.replace("_", " ") },
-        { label: "Area", value: r.area },
-        { label: "Crew", value: String(r.crew) },
-        { label: "Mission", value: r.assignedIncidentId ?? "Unassigned" },
-        { label: "ETA", value: r.etaMinutes ? `${r.etaMinutes} min` : "—" },
+        { label: "Type", value: resource.type },
+        { label: "Status", value: resource.status.replace("_", " ") },
+        { label: "Area", value: resource.area },
+        { label: "Crew", value: String(resource.crew) },
+        { label: "Mission", value: resource.assignedIncidentId ?? "Unassigned" },
+        { label: "ETA", value: resource.etaMinutes ? `${resource.etaMinutes} min` : "—" },
       ],
     };
   }
+
   if (selection.kind === "relief") {
-    const c = state.reliefCenters.find((x) => x.id === selection.id);
-    if (!c) return null;
+    const center = state.reliefCenters.find((item) => item.id === selection.id);
+    if (!center) return null;
+
     return {
-      eyebrow: `Relief centre ${c.id}`,
-      title: c.name,
+      eyebrow: `Relief centre ${center.id}`,
+      title: center.name,
       rows: [
-        { label: "Status", value: c.status },
-        { label: "Occupancy", value: `${c.occupancy}/${c.capacity}` },
-        { label: "Food", value: c.food },
-        { label: "Water", value: c.water },
-        { label: "Medical support", value: c.medicalSupport ? "Available" : "Not available" },
-        { label: "Updated", value: timeAgo(c.updatedAt) },
+        { label: "Status", value: center.status },
+        { label: "Occupancy", value: `${center.occupancy}/${center.capacity}` },
+        { label: "Food", value: center.food },
+        { label: "Water", value: center.water },
+        { label: "Medical support", value: center.medicalSupport ? "Available" : "Not available" },
+        { label: "Updated", value: timeAgo(center.updatedAt) },
       ],
     };
   }
+
   if (selection.kind === "road") {
-    const r = state.roads.find((x) => x.id === selection.id);
-    if (!r) return null;
+    const road = state.roads.find((item) => item.id === selection.id);
+    if (!road) return null;
+
     return {
-      eyebrow: `Road ${r.id}`,
-      title: r.name,
+      eyebrow: `Road ${road.id}`,
+      title: road.name,
       rows: [
-        { label: "Status", value: r.status.replace("_", " ") },
-        { label: "Severity", value: r.severity },
-        { label: "Note", value: r.note ?? "—" },
-        { label: "Last update", value: timeAgo(r.updatedAt) },
+        { label: "Status", value: road.status.replace("_", " ") },
+        { label: "Severity", value: road.severity },
+        { label: "Note", value: road.note ?? "—" },
+        { label: "Last update", value: timeAgo(road.updatedAt) },
       ],
     };
   }
-  const z = state.zones.find((x) => x.id === selection.id);
-  if (!z) return null;
+
+  const zone = state.zones.find((item) => item.id === selection.id);
+  if (!zone) return null;
+
   return {
-    eyebrow: `Disaster zone ${z.id}`,
-    title: z.name,
+    eyebrow: `Disaster zone ${zone.id}`,
+    title: zone.name,
     rows: [
-      { label: "Hazard", value: z.hazard },
-      { label: "Risk", value: z.risk },
-      { label: "Radius", value: `${z.radiusKm} km` },
-      { label: "Population exposed", value: z.populationExposed.toLocaleString("en-IN") },
-      { label: "Evacuation", value: z.evacuationRecommended ? "Recommended" : "Not advised yet" },
+      { label: "Hazard", value: zone.hazard },
+      { label: "Risk", value: zone.risk },
+      { label: "Radius", value: `${zone.radiusKm} km` },
+      { label: "Population exposed", value: zone.populationExposed.toLocaleString("en-IN") },
+      { label: "Evacuation", value: zone.evacuationRecommended ? "Recommended" : "Not advised yet" },
     ],
   };
 }

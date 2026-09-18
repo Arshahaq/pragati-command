@@ -18,28 +18,41 @@ const DESCRIPTION_LENGTH_LIMIT = 8_000;
 export function describeError(error: unknown): string {
   const parts: string[] = [];
   let current: unknown = error;
+
   for (let depth = 0; depth < CAUSE_DEPTH_LIMIT && current != null; depth++) {
     if (!(current instanceof Error)) {
       parts.push(typeof current === "string" ? current : safeStringify(current));
       break;
     }
+
     const label = depth === 0 ? "" : "caused by: ";
     const status = describeStatus(current);
     parts.push(`${label}${current.stack ?? `${current.name}: ${current.message}`}${status}`);
     current = current.cause;
   }
+
   return parts.join("\n").slice(0, DESCRIPTION_LENGTH_LIMIT);
 }
 
 function describeStatus(error: Error): string {
-  const { status, statusCode } = error as { status?: unknown; statusCode?: unknown };
-  const value = status ?? statusCode;
-  return typeof value === "number" ? ` (status ${value})` : "";
+  const details: string[] = [];
+
+  const maybeStatus = (error as { status?: unknown }).status;
+  if (typeof maybeStatus === "number") {
+    details.push(`status=${maybeStatus}`);
+  }
+
+  const maybeStatusCode = (error as { statusCode?: unknown }).statusCode;
+  if (typeof maybeStatusCode === "number") {
+    details.push(`statusCode=${maybeStatusCode}`);
+  }
+
+  return details.length > 0 ? ` | ${details.join(" | ")}` : "";
 }
 
 function safeStringify(value: unknown): string {
   try {
-    return JSON.stringify(value) ?? String(value);
+    return typeof value === "string" ? value : JSON.stringify(value, null, 2) ?? String(value);
   } catch {
     return String(value);
   }
@@ -49,16 +62,14 @@ function isErrorLike(value: unknown): value is Error {
   return value instanceof Error;
 }
 
-// Wrap console.error so errors logged by any layer — including h3's internal
-// unhandled-error logging, which this file cannot hook directly — are both
-// recorded for consumeLastCapturedError and expanded before serialization.
+// Wrap console.error so the original error is recorded alongside a useful expanded message.
 const originalConsoleError = console.error.bind(console);
-console.error = (...args: unknown[]) => {
+console.error = (...args: unknown[]): void => {
   const expanded = args.map((arg) => {
-    if (!isErrorLike(arg)) return arg;
     record(arg);
-    return describeError(arg);
+    return isErrorLike(arg) ? describeError(arg) : arg;
   });
+
   originalConsoleError(...expanded);
 };
 
@@ -75,6 +86,7 @@ export function consumeLastCapturedError(): unknown {
     lastCapturedError = undefined;
     return undefined;
   }
+
   const { error } = lastCapturedError;
   lastCapturedError = undefined;
   return error;

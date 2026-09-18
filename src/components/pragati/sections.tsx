@@ -1,11 +1,11 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { usePragati } from "@/lib/pragati/store";
 import { CITIZEN_LOCATION } from "@/lib/pragati/seed";
-import { haversineKm, planRoutes, rankHospitals, riskLabel } from "@/lib/pragati/logic";
-import { serviceRegistry, visionService } from "@/lib/pragati/services";
+import { haversineKm, rankHospitals } from "@/lib/pragati/logic";
+import { routingService, serviceRegistry, visionService } from "@/lib/pragati/services";
 import type {
   GeoPoint,
   Incident,
@@ -14,7 +14,6 @@ import type {
 } from "@/lib/pragati/types";
 import { MapCanvas } from "./MapCanvas";
 import { IncidentDrawer } from "./IncidentDrawer";
-import { AiPanel } from "./AiPanel";
 import {
   KpiCard,
   Panel,
@@ -27,13 +26,13 @@ import {
 import {
   Activity,
   Ambulance,
-  Bell,
   Building2,
   Search,
   ShieldAlert,
   Siren,
   Tent,
   TriangleAlert,
+  Users,
 } from "lucide-react";
 
 const INCIDENT_TYPES: IncidentType[] = [
@@ -54,10 +53,10 @@ export function KpiRow() {
   const { kpis } = usePragati();
   return (
     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
-      <KpiCard label="Active incidents" value={kpis.activeIncidents} tone="info" hint={`${kpis.unassigned} awaiting assignment`} icon={<TriangleAlert className="size-4" />} />
-      <KpiCard label="Critical incidents" value={kpis.criticalIncidents} tone="critical" hint={`${kpis.peopleAffected} people affected`} icon={<Siren className="size-4" />} />
-      <KpiCard label="Available ambulances" value={kpis.availableAmbulances} tone="safe" hint="Ready for dispatch" icon={<Ambulance className="size-4" />} />
-      <KpiCard label="Available rescue teams" value={kpis.availableRescueTeams} tone="safe" hint="Includes boat-capable units" icon={<ShieldAlert className="size-4" />} />
+      <KpiCard label="Active incidents" value={kpis.activeIncidents} tone="info" hint={`${kpis.unassigned} need assignment`} icon={<TriangleAlert className="size-4" />} />
+      <KpiCard label="Critical incidents" value={kpis.criticalIncidents} tone="critical" hint="Immediate attention" icon={<Siren className="size-4" />} />
+      <KpiCard label="People requiring help" value={kpis.peopleAffected} tone="critical" hint="Across open incidents" icon={<Users className="size-4" />} />
+      <KpiCard label="Available response units" value={kpis.availableAmbulances + kpis.availableRescueTeams} tone="safe" hint="Ready for dispatch" icon={<ShieldAlert className="size-4" />} />
       <KpiCard label="Operational hospitals" value={kpis.operationalHospitals} tone="neutral" hint="Clear access + capacity" icon={<Building2 className="size-4" />} />
       <KpiCard label="Open relief centres" value={kpis.openReliefCenters} tone="neutral" hint="Accepting evacuees" icon={<Tent className="size-4" />} />
     </div>
@@ -411,16 +410,38 @@ export function RoutePlanner({ origin }: { origin?: GeoPoint | undefined }) {
   ];
   const [destId, setDestId] = useState(destinations[0]?.id ?? "");
   const destination = destinations.find((d) => d.id === destId) ?? destinations[0];
-  const routes = useMemo(
-    () => (destination ? planRoutes(from, destination.point, state.roads, state.zones) : []),
-    [from, destination, state.roads, state.zones],
-  );
+  const [routes, setRoutes] = useState<import("@/lib/pragati/types").RouteOption[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    if (!destination) {
+      setRoutes([]);
+      return () => {
+        active = false;
+      };
+    }
+    setLoading(true);
+    routingService.getRoutes(from, destination.point, state.roads, state.zones).then((nextRoutes) => {
+      if (active) setRoutes(nextRoutes);
+    }).finally(() => {
+      if (active) setLoading(false);
+    });
+    return () => {
+      active = false;
+    };
+  }, [destId, destination?.point.lat, destination?.point.lng, from.lat, from.lng, state.roads, state.zones]);
+
+  const recommendedRoute = routes.find((route) => route.recommended);
+  const visibleRoutes = recommendedRoute
+    ? [recommendedRoute, ...routes.filter((route) => route.id !== recommendedRoute.id)].slice(0, 2)
+    : routes.slice(0, 2);
 
   return (
     <div className="grid gap-4 lg:grid-cols-[1.5fr_1fr]">
       <MapCanvas className="min-h-[420px]" routes={routes} origin={from} compact />
       <div className="space-y-4">
-        <Panel eyebrow="Simulated routing engine" title="Plan a route">
+        <Panel eyebrow="OpenStreetMap road routing" title="Plan a route">
           <div className="space-y-3 text-xs">
             <div>
               <p className="label-eyebrow mb-1">From</p>
@@ -439,28 +460,31 @@ export function RoutePlanner({ origin }: { origin?: GeoPoint | undefined }) {
               </select>
             </div>
             <p className="text-[11px] leading-relaxed text-muted-foreground">
-              Routes are generated from simulated hazard-weighted costs. Replace{" "}
-              <code className="text-foreground">routingService</code> with a real directions API to
-              use live road geometry.
+              Routes follow the OpenStreetMap road network through OSRM. If the public routing
+              service is unavailable, PRAGATI uses a deterministic local fallback and marks it as
+              simulated.
             </p>
           </div>
         </Panel>
 
-        {routes.map((route) => {
-          const risk = riskLabel(route.riskScore);
+        {loading && <Panel eyebrow="Road network" title="Finding a route"><p className="text-xs text-muted-foreground">Checking the actual Bengaluru road network...</p></Panel>}
+        {!loading && visibleRoutes.map((route) => {
           return (
             <Panel
               key={route.id}
-              eyebrow={`${route.distanceKm} km · risk ${route.riskScore}/100`}
+              eyebrow={route.recommended ? "Primary recommended route" : "Alternative route"}
               title={
                 <span className="flex items-center gap-2">
-                  {route.label} route · {route.minutes} min
+                  {route.recommended ? "Safest route" : "Alternative route"} · {route.distanceKm} km · {route.minutes} min
                   {route.recommended && <StatusPill tone="safe">Recommended</StatusPill>}
                 </span>
               }
             >
-              <StatusPill tone={risk.tone === "safe" ? "safe" : risk.tone === "warning" ? "warning" : "critical"}>{risk.label}</StatusPill>
+              <StatusPill tone={route.routeStatus === "safe" ? "safe" : route.routeStatus === "caution" ? "warning" : "critical"}>
+                {route.routeStatus === "safe" ? "Safe route" : route.routeStatus === "caution" ? "Use caution" : route.routeStatus === "blocked" ? "Blocked" : "High risk"}
+              </StatusPill>
               <p className="mt-2 text-xs leading-relaxed text-muted-foreground">{route.reason}</p>
+              {route.routeSource === "fallback" && <p className="mt-1 text-[11px] text-warning">Public road routing unavailable. Showing a local simulated fallback.</p>}
             </Panel>
           );
         })}
@@ -470,48 +494,142 @@ export function RoutePlanner({ origin }: { origin?: GeoPoint | undefined }) {
 }
 
 export function SafeHospitalList({ compact }: { compact?: boolean | undefined }) {
-  const { citizenHospitalRanking } = usePragati();
+  const { state, citizenHospitalRanking } = usePragati();
+  const [emergencyType, setEmergencyType] = useState<IncidentType>("Medical Emergency");
+  const [searched, setSearched] = useState(!compact);
   const list = compact ? citizenHospitalRanking.slice(0, 3) : citizenHospitalRanking;
-  const best = citizenHospitalRanking[0];
+  const best = citizenHospitalRanking.find((item) => item.isRecommended);
   const nearest = [...citizenHospitalRanking].sort((a, b) => a.distanceKm - b.distanceKm)[0];
+  const [liveRoutes, setLiveRoutes] = useState<import("@/lib/pragati/types").RouteOption[]>([]);
+
+  useEffect(() => {
+    let active = true;
+    if (!best) return () => {
+      active = false;
+    };
+    routingService.getRoutes(CITIZEN_LOCATION, best.hospital.location, state.roads, state.zones).then((routes) => {
+      if (active) setLiveRoutes(routes);
+    });
+    return () => {
+      active = false;
+    };
+  }, [best?.hospital.id, state.roads, state.zones]);
+
+  const liveBest = liveRoutes.find((route) => route.recommended);
+  const displayRoute = liveBest ?? best?.route;
+
+  if (!searched) {
+    return (
+      <Panel eyebrow="Safety-first hospital routing" title="Find the safest hospital">
+        <div className="space-y-3 text-xs">
+          <p className="leading-relaxed text-muted-foreground">
+            PRAGATI compares distance, ETA, road access, disaster exposure, operational status,
+            emergency capacity and route reliability. The nearest hospital is not always the safest.
+          </p>
+          <div>
+            <p className="label-eyebrow mb-1.5">Emergency type</p>
+            <select
+              value={emergencyType}
+              onChange={(event) => setEmergencyType(event.target.value as IncidentType)}
+              className="w-full rounded-md border border-border bg-surface-2 px-2.5 py-2 text-foreground outline-none"
+            >
+              {(["Medical Emergency", "Accident", "Fire", "Trapped Person", "Flood"] as IncidentType[]).map((type) => (
+                <option key={type} value={type} className="bg-surface">{type}</option>
+              ))}
+            </select>
+          </div>
+          <button
+            type="button"
+            onClick={() => setSearched(true)}
+            className="w-full rounded-md bg-primary px-3 py-2.5 text-sm font-semibold text-primary-foreground hover:bg-primary/90"
+          >
+            Find Safest Hospital
+          </button>
+          <p className="text-[11px] text-muted-foreground">Using your shared demo location: {CITIZEN_LOCATION.area}</p>
+        </div>
+      </Panel>
+    );
+  }
 
   return (
     <div className="space-y-3">
+      {!compact && (
+        <Panel eyebrow={state.scenarioActive ? "Flood scenario active · recalculated" : "Safety-first hospital routing"} title="Find the safest hospital">
+          <div className="flex flex-wrap items-end gap-3 text-xs">
+            <label className="min-w-56 flex-1">
+              <span className="label-eyebrow mb-1.5 block">Emergency type</span>
+              <select value={emergencyType} onChange={(event) => setEmergencyType(event.target.value as IncidentType)} className="w-full rounded-md border border-border bg-surface-2 px-2.5 py-2 text-foreground outline-none">
+                {(["Medical Emergency", "Accident", "Fire", "Trapped Person", "Flood"] as IncidentType[]).map((type) => <option key={type} value={type} className="bg-surface">{type}</option>)}
+              </select>
+            </label>
+            <button type="button" onClick={() => setSearched(true)} className="rounded-md bg-primary px-3 py-2 font-semibold text-primary-foreground hover:bg-primary/90">Find Safest Hospital</button>
+            <span className="text-[11px] text-muted-foreground">Location: {CITIZEN_LOCATION.area}</span>
+          </div>
+        </Panel>
+      )}
+
+      {best && (
+        <article className="panel border-forest/50 bg-forest/8 p-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <p className="label-eyebrow text-forest">Recommended for your safety</p>
+              <h2 className="mt-1 text-lg font-semibold text-foreground">{best.hospital.name}</h2>
+              <p className="text-xs text-muted-foreground">{best.hospital.area} · for {emergencyType}</p>
+            </div>
+            <StatusPill tone="safe">Safety score {best.totalScore}/100</StatusPill>
+          </div>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <StatusPill tone={liveBest?.routeStatus === "safe" || (!liveBest && best.routeStatus === "safe") ? "safe" : liveBest?.routeStatus === "caution" || (!liveBest && best.routeStatus === "caution") ? "warning" : "critical"}>Route safety: {liveBest?.routeStatus?.replace("_", " ") ?? best.routeStatus}</StatusPill>
+            <StatusPill tone="info">{liveBest?.distanceKm ?? best.distanceKm} km · ETA {liveBest?.minutes ?? best.estimatedTravelTimeMinutes} min</StatusPill>
+            <StatusPill tone={best.emergencyCapacity > 6 ? "safe" : "warning"}>Emergency capacity: {best.emergencyCapacity} beds</StatusPill>
+            <StatusPill tone={best.disasterRisk === "low" ? "safe" : best.disasterRisk === "critical" ? "critical" : "warning"}>Disaster risk: {best.disasterRisk}</StatusPill>
+          </div>
+          <div className="mt-3">
+            <p className="label-eyebrow mb-1.5">Why this hospital?</p>
+            <ul className="space-y-1 text-xs text-foreground">{best.reasons.map((reason) => <li key={reason}>• {reason}</li>)}</ul>
+          </div>
+          <div className="mt-4 flex flex-wrap gap-2">
+            <Link to="/citizen/safe-route" className="rounded-md bg-primary px-3 py-2 text-xs font-semibold text-primary-foreground">View Route</Link>
+            <Link to="/citizen/help" className="rounded-md border border-critical/40 bg-critical/10 px-3 py-2 text-xs font-semibold text-critical">Request Emergency Help</Link>
+          </div>
+        </article>
+      )}
+
+      {best && !compact && displayRoute && <MapCanvas className="min-h-[360px]" origin={CITIZEN_LOCATION} routes={[displayRoute]} compact />}
+
       {best && nearest && best.hospital.id !== nearest.hospital.id && (
-        <div className="panel border-forest/40 bg-forest/8 p-4">
-          <p className="label-eyebrow text-forest">Why not the nearest hospital?</p>
+        <div className="panel border-warning/40 bg-warning/8 p-4">
+          <p className="label-eyebrow text-warning">Why not the nearest hospital?</p>
           <p className="mt-1 text-sm leading-relaxed text-foreground">
-            {best.hospital.name} is recommended because {nearest.hospital.name} is closer (
-            {nearest.distanceKm} km) but{" "}
-            {nearest.hospital.accessAffected ? "its access road is currently flood affected" : "its emergency capacity is nearly exhausted"}.
+            {nearest.hospital.name} is closer at {nearest.distanceKm} km, but {nearest.warnings[0] ?? nearest.disqualificationReason ?? "its route is less reliable"}. {best.hospital.name} is safer for this emergency.
           </p>
         </div>
       )}
-      {list.map((item) => (
-        <article key={item.hospital.id} className={cn("panel p-4", item.recommended && "border-forest/50")}>
+      <details className="panel group">
+        <summary className="cursor-pointer list-none p-4 text-sm font-semibold text-foreground">Alternative hospitals <span className="text-xs font-normal text-muted-foreground">({Math.max(0, list.length - 1)} available)</span></summary>
+        <div className="space-y-3 border-t border-border p-3">
+        {list.filter((item) => !item.isRecommended).map((item) => (
+        <article key={item.hospital.id} className={cn("panel p-4", item.isRecommended && "border-forest/50")}>
           <div className="flex flex-wrap items-start justify-between gap-2">
             <div>
-              <h3 className="text-sm font-semibold text-foreground">{item.hospital.name}</h3>
-              <p className="text-xs text-muted-foreground">{item.hospital.area} · {item.distanceKm} km away</p>
+              <h3 className="text-sm font-semibold text-foreground">#{item.rank} · {item.hospital.name}</h3>
+              <p className="text-xs text-muted-foreground">{item.hospital.area} · {item.distanceKm} km · ETA {item.estimatedTravelTimeMinutes} min</p>
             </div>
-            <StatusPill tone={item.recommended ? "safe" : "neutral"}>
-              {item.recommended ? "Recommended: YES" : "Recommended: NO"}
+            <StatusPill tone={item.isRecommended ? "safe" : item.isDisqualified ? "critical" : "neutral"}>
+              {item.isRecommended ? "Safest recommended" : item.isDisqualified ? "Disqualified" : "Alternative"}
             </StatusPill>
           </div>
           <div className="mt-3 flex flex-wrap gap-2">
-            <StatusPill tone={item.hospital.accessAffected ? "critical" : "safe"}>
-              {item.hospital.accessAffected ? "Access affected" : "Access clear"}
-            </StatusPill>
-            <StatusPill tone={item.capacityFree > 4 ? "safe" : item.capacityFree > 0 ? "warning" : "critical"}>
-              Emergency capacity: {item.capacityFree > 0 ? `${item.capacityFree} beds` : "full"}
-            </StatusPill>
-            <StatusPill tone={riskLabel(item.riskScore).tone === "safe" ? "safe" : riskLabel(item.riskScore).tone === "warning" ? "warning" : "critical"}>
-              Route safety: {riskLabel(item.riskScore).label}
-            </StatusPill>
+            <StatusPill tone={item.routeStatus === "safe" ? "safe" : item.routeStatus === "caution" ? "warning" : "critical"}>Route: {item.routeStatus}</StatusPill>
+            <StatusPill tone={item.emergencyCapacity > 4 ? "safe" : item.emergencyCapacity > 0 ? "warning" : "critical"}>Emergency capacity: {item.emergencyCapacity > 0 ? `${item.emergencyCapacity} beds` : "full"}</StatusPill>
+            <StatusPill tone={item.disasterRisk === "low" ? "safe" : item.disasterRisk === "critical" ? "critical" : "warning"}>Risk: {item.disasterRisk}</StatusPill>
           </div>
           <p className="mt-2.5 text-xs leading-relaxed text-muted-foreground">{item.reason}</p>
+          {item.warnings.length > 0 && <p className="mt-1.5 text-[11px] text-warning">Warning: {item.warnings.join(" ")}</p>}
         </article>
       ))}
+        </div>
+      </details>
     </div>
   );
 }
@@ -1167,8 +1285,11 @@ export function ResponderMissions() {
       )}
       {missions.map((incident) => {
         const resource = state.resources.find((r) => r.id === incident.assignedResourceId);
-        const hospitals = rankHospitals(incident.location, state.hospitals, state.roads, state.zones);
-        const best = hospitals[0];
+        const hospitals = rankHospitals(incident.location, state.hospitals, state.roads, state.zones, {
+          active: state.scenarioActive,
+          floodSeverity: state.whatIf.floodSeverity,
+        });
+        const best = hospitals.find((hospital) => hospital.isRecommended) ?? hospitals[0];
         return (
           <Panel
             key={incident.id}
@@ -1212,24 +1333,11 @@ export function OverviewGrid() {
       <div className="grid gap-4 xl:grid-cols-[1.6fr_1fr]">
         <MapCanvas className="min-h-[520px]" selection={selection ?? null} onSelect={setSelection} />
         <div className="space-y-4">
-          <AiPanel limit={3} />
-          <Panel eyebrow="Latest signals" title="Alert feed" bodyClassName="p-0">
-            <ul className="max-h-64 divide-y divide-border overflow-y-auto">
-              {usePragatiAlerts().map((alert) => (
-                <li key={alert.id} className="flex items-start gap-2 p-3">
-                  <Bell className={cn("mt-0.5 size-3.5", alert.level === "critical" ? "text-critical" : alert.level === "warning" ? "text-warning" : "text-primary")} />
-                  <div>
-                    <p className="text-xs font-medium text-foreground">{alert.title}</p>
-                    <p className="text-[11px] text-muted-foreground">{timeAgo(alert.at)} · {alert.source}</p>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          </Panel>
+          <PriorityQueue limit={4} />
         </div>
       </div>
       <div className="grid gap-4 xl:grid-cols-2">
-        <PriorityQueue limit={4} />
+        <CommandActivity />
         <Panel eyebrow="Operations" title="Situation summary">
           <SituationSummary />
         </Panel>
@@ -1238,9 +1346,25 @@ export function OverviewGrid() {
   );
 }
 
-function usePragatiAlerts() {
+function CommandActivity() {
   const { state } = usePragati();
-  return state.alerts.slice(0, 8);
+  const critical = state.incidents.filter((incident) => incident.severity === "critical" && incident.status !== "resolved").slice(0, 5);
+  return (
+    <Panel eyebrow="Needs attention" title="Priority activity" bodyClassName="p-0">
+      <ul className="divide-y divide-border">
+        {critical.map((incident) => (
+          <li key={incident.id} className="flex items-center justify-between gap-3 p-3 text-xs">
+            <div className="min-w-0">
+              <p className="truncate font-semibold text-foreground">{incident.type} · {incident.area}</p>
+              <p className="text-muted-foreground">{incident.peopleAffected} people affected · {incident.assignedResourceId ? "Assigned" : "Unassigned"}</p>
+            </div>
+            <StatusPill tone={incident.assignedResourceId ? "info" : "critical"}>{incident.assignedResourceId ? "In progress" : "Act now"}</StatusPill>
+          </li>
+        ))}
+        {critical.length === 0 && <li className="p-4 text-xs text-muted-foreground">No critical incidents require attention.</li>}
+      </ul>
+    </Panel>
+  );
 }
 
 function SituationSummary() {
@@ -1271,46 +1395,35 @@ function SituationSummary() {
   );
 }
 export function CitizenHome() {
-  const { state, kpis } = usePragati();
+  const { state } = usePragati();
   const actions = [
-    { to: "/citizen/help", label: "Request emergency help", desc: "Send your location and situation to the command centre", icon: <Siren className="size-4" /> },
-    { to: "/citizen/hospitals", label: "Find a safe hospital", desc: "Ranked by access safety and live capacity", icon: <Building2 className="size-4" /> },
-    { to: "/citizen/relief-centers", label: "Find a relief center", desc: "Open shelters with food, water and medical support", icon: <Tent className="size-4" /> },
-    { to: "/citizen/safe-route", label: "Plan a safe route", desc: "Avoid flooded and closed roads", icon: <Search className="size-4" /> },
-    { to: "/citizen/report", label: "Report an incident", desc: "Flag flooding, damage or a trapped person", icon: <TriangleAlert className="size-4" /> },
-    { to: "/citizen/requests", label: "My requests", desc: "Track status and assigned teams", icon: <Activity className="size-4" /> },
+    { to: "/citizen/help", label: "I NEED HELP", desc: "Send an emergency request", icon: <Siren className="size-5" /> },
+    { to: "/citizen/hospitals", label: "FIND SAFE HOSPITAL", desc: "Find a hospital with a safe route", icon: <Building2 className="size-5" /> },
+    { to: "/citizen/safe-route", label: "FIND SAFE ROUTE", desc: "Avoid flooded and closed roads", icon: <Search className="size-5" /> },
+    { to: "/citizen/relief-centers", label: "FIND RELIEF CENTER", desc: "Locate open shelter and support", icon: <Tent className="size-5" /> },
+    { to: "/citizen/report", label: "REPORT INCIDENT", desc: "Report flooding, damage or danger", icon: <TriangleAlert className="size-5" /> },
+    { to: "/citizen/requests", label: "TRACK MY REQUEST", desc: "See response status and updates", icon: <Activity className="size-5" /> },
   ] as const;
 
   return (
     <div className="space-y-4">
+      <div className="rounded-lg border border-border bg-surface-2 px-4 py-3 text-sm">
+        <span className="font-semibold text-foreground">{state.scenarioActive ? "Flood conditions are active" : "Bengaluru safety status"}</span>
+        <span className="ml-2 text-muted-foreground">{state.scenarioActive ? "Use safe routes and follow evacuation guidance." : "Choose an action below for help."}</span>
+      </div>
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
         {actions.map((a) => (
           <Link
             key={a.to}
             to={a.to}
-            className="group rounded-lg border border-border bg-surface-2 p-4 transition-colors hover:border-primary/60"
+            className="group rounded-lg border border-border bg-surface-2 p-5 transition-colors hover:border-primary/60 sm:min-h-32"
           >
-            <p className="flex items-center gap-2 text-sm font-semibold">{a.icon} {a.label}</p>
-            <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{a.desc}</p>
+            <p className="flex items-center gap-2 text-sm font-bold tracking-wide">{a.icon} {a.label}</p>
+            <p className="mt-2 text-xs leading-relaxed text-muted-foreground">{a.desc}</p>
           </Link>
         ))}
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-2">
-        <Panel title="Situation near you" eyebrow={state.scenarioActive ? "Flood scenario active" : "Baseline monitoring"}>
-          <Rows
-            rows={[
-              { label: "Active incidents in city", value: String(kpis.activeIncidents) },
-              { label: "Roads flooded or closed", value: String(state.roads.filter((r) => r.status !== "clear").length) },
-              { label: "Relief centres open", value: String(state.reliefCenters.length) },
-              { label: "Hospitals accepting patients", value: String(kpis.operationalHospitals) },
-            ]}
-          />
-        </Panel>
-        <SafeHospitalList compact />
-      </div>
-
-      <AlertsView />
     </div>
   );
 }

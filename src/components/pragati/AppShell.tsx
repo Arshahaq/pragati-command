@@ -1,8 +1,9 @@
-import { Link, useRouterState } from "@tanstack/react-router";
-import { useState, type ReactNode } from "react";
+import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
+import { useEffect, useState, type ReactNode } from "react";
 import { cn } from "@/lib/utils";
 import { usePragati } from "@/lib/pragati/store";
 import type { Role } from "@/lib/pragati/types";
+import { useAuth } from "@/lib/AuthProvider";
 import { LiveClock, PrototypeTag, StatusPill } from "./primitives";
 import {
   Activity,
@@ -25,6 +26,8 @@ import {
   Tent,
   TriangleAlert,
   Users,
+  LogOut,
+  UserRound,
 } from "lucide-react";
 
 interface NavItem {
@@ -54,7 +57,6 @@ const nav: Record<Role, NavItem[]> = {
     { to: "/command/drones", label: "Field Intelligence", icon: <Radar className="size-4" /> },
     { to: "/command/simulator", label: "Scenario Simulator", icon: <Siren className="size-4" /> },
     { to: "/command/alerts", label: "Alerts", icon: <Bell className="size-4" /> },
-    { to: "/command/reports", label: "Reports", icon: <BarChart3 className="size-4" /> },
     { to: "/command/settings", label: "Settings", icon: <Settings className="size-4" /> },
   ],
   citizen: [
@@ -101,10 +103,25 @@ export function AppShell({
   children: ReactNode;
 }) {
   const { state, kpis } = usePragati();
+  const { user, ready, logout } = useAuth();
+  const navigate = useNavigate();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const [open, setOpen] = useState(false);
   const items = nav[role];
   const unackAlerts = state.alerts.filter((a) => !a.acknowledged).length;
+
+  useEffect(() => {
+    if (!ready) return;
+    if (!user) {
+      void navigate({ to: "/login" });
+      return;
+    }
+    if (user.role !== role) void navigate({ to: roleMeta[user.role].home });
+  }, [navigate, pathname, ready, role, user]);
+
+  if (!ready || !user || user.role !== role) {
+    return <div className="flex min-h-screen items-center justify-center bg-background text-sm text-muted-foreground">Opening secure demo portal...</div>;
+  }
 
   return (
     <div className="min-h-screen bg-background text-foreground">
@@ -189,6 +206,31 @@ export function AppShell({
               </div>
               <div className="flex items-center gap-2">
                 {actions}
+                <div className="hidden items-center gap-2 border-l border-border pl-3 sm:flex">
+                  <UserRound className="size-3.5 text-primary" />
+                  <span className="max-w-36 truncate text-xs text-muted-foreground" title={user.email}>
+                    {user.name}
+                  </span>
+                  <Link
+                    to="/login"
+                    className="text-xs font-medium text-primary hover:underline"
+                    title="Switch Demo Role"
+                  >
+                    Switch Role
+                  </Link>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      logout();
+                      void navigate({ to: "/login" });
+                    }}
+                    className="rounded-md p-1.5 text-muted-foreground hover:bg-surface-2 hover:text-foreground"
+                    aria-label="Log out"
+                    title="Log out"
+                  >
+                    <LogOut className="size-3.5" />
+                  </button>
+                </div>
                 <div className="hidden items-center gap-2 sm:flex">
                   <StatusPill tone={state.scenarioActive ? "critical" : "safe"}>
                     <span className="relative flex size-1.5">
@@ -228,34 +270,22 @@ function Emblem() {
 }
 
 export function RoleSwitcher({ className }: { className?: string | undefined }) {
-  const { state, setRole } = usePragati();
-  const roles: Role[] = ["government", "citizen", "responder", "hospital", "relief"];
+  const { state } = usePragati();
+  const { user } = useAuth();
   return (
     <div className={cn("border-b border-sidebar-border px-3 py-3", className)}>
       <div className="mb-2 flex items-center justify-between">
         <p className="label-eyebrow">Prototype Demo Mode</p>
         <PrototypeTag className="scale-90" />
       </div>
-      <div className="grid grid-cols-1 gap-1">
-        {roles.map((role) => {
-          const active = state.role === role;
-          return (
-            <Link
-              key={role}
-              to={roleMeta[role].home}
-              onClick={() => setRole(role)}
-              className={cn(
-                "flex items-center justify-between rounded-md border px-2.5 py-1.5 text-xs transition-colors",
-                active
-                  ? "border-primary/50 bg-primary/12 font-semibold text-foreground"
-                  : "border-transparent text-muted-foreground hover:border-border hover:text-foreground",
-              )}
-            >
-              <span>{roleMeta[role].label}</span>
-              <span className="tabular text-[10px] tracking-widest opacity-70">{roleMeta[role].short}</span>
-            </Link>
-          );
-        })}
+      <div className="rounded-md border border-primary/30 bg-primary/8 px-2.5 py-2 text-xs">
+        <div className="flex items-center justify-between gap-2">
+          <span className="font-semibold text-foreground">{user ? roleMeta[user.role].label : roleMeta[state.role].label}</span>
+          <span className="tabular text-[10px] tracking-widest text-primary">{user ? roleMeta[user.role].short : roleMeta[state.role].short}</span>
+        </div>
+        <Link to="/login" className="mt-1 inline-block text-[11px] font-medium text-primary hover:underline">
+          Switch Demo Role
+        </Link>
       </div>
       <p className="mt-2 text-[10px] leading-relaxed text-muted-foreground">
         Demo-only view switch. Production deployments require authenticated, role-based access

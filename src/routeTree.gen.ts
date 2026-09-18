@@ -10,6 +10,7 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as LoginRouteImport } from './routes/login'
 import { Route as CitizenIndexRouteImport } from './routes/citizen.index'
 import { Route as CitizenHelpRouteImport } from './routes/citizen.help'
 import { Route as CitizenHospitalsRouteImport } from './routes/citizen.hospitals'
@@ -46,6 +47,11 @@ import { Route as ResponderRoutesRouteImport } from './routes/responder.routes'
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const LoginRoute = LoginRouteImport.update({
+  id: '/login',
+  path: '/login',
   getParentRoute: () => rootRouteImport,
 } as any)
 const CitizenIndexRoute = CitizenIndexRouteImport.update({
@@ -211,6 +217,7 @@ const ResponderRoutesRoute = ResponderRoutesRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/login': typeof LoginRoute
   '/citizen/help': typeof CitizenHelpRoute
   '/citizen/hospitals': typeof CitizenHospitalsRoute
   '/citizen/relief-centers': typeof CitizenReliefCentersRoute
@@ -246,6 +253,7 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/login': typeof LoginRoute
   '/citizen/help': typeof CitizenHelpRoute
   '/citizen/hospitals': typeof CitizenHospitalsRoute
   '/citizen/relief-centers': typeof CitizenReliefCentersRoute
@@ -282,6 +290,7 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/login': typeof LoginRoute
   '/citizen/help': typeof CitizenHelpRoute
   '/citizen/hospitals': typeof CitizenHospitalsRoute
   '/citizen/relief-centers': typeof CitizenReliefCentersRoute
@@ -319,6 +328,7 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/login'
     | '/citizen/help'
     | '/citizen/hospitals'
     | '/citizen/relief-centers'
@@ -354,6 +364,7 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
+    | '/login'
     | '/citizen/help'
     | '/citizen/hospitals'
     | '/citizen/relief-centers'
@@ -389,6 +400,7 @@ export interface FileRouteTypes {
   id:
     | '__root__'
     | '/'
+    | '/login'
     | '/citizen/help'
     | '/citizen/hospitals'
     | '/citizen/relief-centers'
@@ -425,6 +437,7 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  LoginRoute: typeof LoginRoute
   CitizenHelpRoute: typeof CitizenHelpRoute
   CitizenHospitalsRoute: typeof CitizenHospitalsRoute
   CitizenReliefCentersRoute: typeof CitizenReliefCentersRoute
@@ -466,6 +479,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/login': {
+      id: '/login'
+      path: '/login'
+      fullPath: '/login'
+      preLoaderRoute: typeof LoginRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/citizen/': {
@@ -697,6 +717,7 @@ declare module '@tanstack/react-router' {
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  LoginRoute: LoginRoute,
   CitizenHelpRoute: CitizenHelpRoute,
   CitizenHospitalsRoute: CitizenHospitalsRoute,
   CitizenReliefCentersRoute: CitizenReliefCentersRoute,

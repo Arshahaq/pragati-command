@@ -28,6 +28,7 @@ import type {
   EmergencyRequest,
   EmergencyResource,
   Hospital,
+  HospitalOverrideAudit,
   Incident,
   ReliefCenter,
   RoadSegment,
@@ -54,6 +55,7 @@ export interface PragatiState {
   drones: DroneMission[];
   events: ScenarioEvent[];
   whatIf: WhatIfState;
+  hospitalOverrides: HospitalOverrideAudit[];
   activeHospitalId: string;
   activeReliefId: string;
   lastUpdated: string;
@@ -84,6 +86,7 @@ const initialState: PragatiState = {
     resourceAvailabilityPct: 100,
     incidentSeverityBias: 40,
   },
+  hospitalOverrides: [],
   activeHospitalId: "H3",
   activeReliefId: "R07",
   lastUpdated: new Date(SIM_EPOCH).toISOString(),
@@ -107,6 +110,7 @@ type Action =
   | { type: "setActiveHospital"; id: string }
   | { type: "setActiveRelief"; id: string }
   | { type: "setDroneDetections"; missionId: string; detections: NonNullable<DroneMission["detections"]> }
+  | { type: "recordHospitalOverride"; audit: HospitalOverrideAudit }
   | { type: "reset" };
 
 const nowIso = () => new Date().toISOString();
@@ -123,6 +127,7 @@ function recompute(state: PragatiState): PragatiState {
     roads: state.roads,
     zones: state.zones,
     now: nowIso(),
+    scenario: { active: state.scenarioActive, floodSeverity: state.whatIf.floodSeverity },
   });
   const decided = new Map(state.recommendations.map((r) => [r.id, r.status]));
   const merged = fresh.map((r) => ({ ...r, status: decided.get(r.id) ?? r.status }));
@@ -515,6 +520,13 @@ function reducer(state: PragatiState, action: Action): PragatiState {
         ),
       };
 
+    case "recordHospitalOverride":
+      return {
+        ...state,
+        hospitalOverrides: [...state.hospitalOverrides, action.audit],
+        lastUpdated: nowIso(),
+      };
+
     case "reset":
       return { ...initialState, role: state.role };
 
@@ -566,8 +578,12 @@ export function PragatiProvider({ children }: { children: ReactNode }) {
   );
 
   const citizenHospitalRanking = useMemo(
-    () => rankHospitals(CITIZEN_LOCATION, state.hospitals, state.roads, state.zones),
-    [state.hospitals, state.roads, state.zones],
+    () =>
+      rankHospitals(CITIZEN_LOCATION, state.hospitals, state.roads, state.zones, {
+        active: state.scenarioActive,
+        floodSeverity: state.whatIf.floodSeverity,
+      }),
+    [state.hospitals, state.roads, state.zones, state.scenarioActive, state.whatIf.floodSeverity],
   );
 
   const setRole = useCallback((role: Role) => dispatch({ type: "setRole", role }), []);

@@ -1,5 +1,6 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { usePragati } from "@/lib/pragati/store";
+import { useAuth } from "@/lib/AuthProvider";
 import { roleMeta } from "@/components/pragati/AppShell";
 import { PrototypeTag, StatusPill } from "@/components/pragati/primitives";
 import type { Role } from "@/lib/pragati/types";
@@ -36,7 +37,8 @@ const roleBlurb: Record<Role, string> = {
 };
 
 function Landing() {
-  const { state, kpis, setRole } = usePragati();
+  const { state, kpis } = usePragati();
+  const { loginAsDemoRole } = useAuth();
 
   return (
     <div className="min-h-screen bg-background">
@@ -74,21 +76,21 @@ function Landing() {
           <div className="mt-6 flex flex-wrap gap-3">
             <Link
               to="/command"
-              onClick={() => setRole("government")}
+              onClick={() => loginAsDemoRole("government")}
               className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground"
             >
-              Open Command Center <ArrowRight className="size-4" />
+              Enter as Government Admin <ArrowRight className="size-4" />
             </Link>
             <Link
               to="/citizen"
-              onClick={() => setRole("citizen")}
+              onClick={() => loginAsDemoRole("citizen")}
               className="inline-flex items-center gap-2 rounded-lg border border-border px-4 py-2.5 text-sm font-medium text-foreground hover:bg-surface-2"
             >
-              Open Citizen Portal
+              Enter as Citizen
             </Link>
             <Link
               to="/command/simulator"
-              onClick={() => setRole("government")}
+              onClick={() => loginAsDemoRole("government")}
               className="inline-flex items-center gap-2 rounded-lg border border-saffron/40 bg-saffron/10 px-4 py-2.5 text-sm font-medium text-saffron"
             >
               <Siren className="size-4" /> Bengaluru Flood scenario
@@ -126,7 +128,7 @@ function Landing() {
               <Link
                 key={role}
                 to={roleMeta[role].home}
-                onClick={() => setRole(role)}
+                onClick={() => loginAsDemoRole(role)}
                 className="panel group p-4 transition-colors hover:border-primary/50"
               >
                 <div className="flex items-center justify-between">

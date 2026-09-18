@@ -72,6 +72,53 @@ export interface Hospital {
   updatedAt: string;
 }
 
+export interface HospitalRecommendationWeights {
+  distanceWeight: number;
+  travelTimeWeight: number;
+  accessibilityWeight: number;
+  disasterRiskWeight: number;
+  operationalStatusWeight: number;
+  emergencyCapacityWeight: number;
+  routeReliabilityWeight: number;
+}
+
+export interface HospitalScoreBreakdown {
+  distance: number;
+  travelTime: number;
+  accessibility: number;
+  disasterRisk: number;
+  operationalStatus: number;
+  emergencyCapacity: number;
+  routeReliability: number;
+}
+
+export interface HospitalRecommendationResult {
+  hospital: Hospital;
+  rank: number;
+  totalScore: number;
+  distanceKm: number;
+  estimatedTravelTimeMinutes: number;
+  routeStatus: "safe" | "caution" | "blocked";
+  disasterRisk: Severity;
+  operationalStatus: HospitalStatus;
+  emergencyCapacity: number;
+  scoreBreakdown: HospitalScoreBreakdown;
+  reasons: string[];
+  warnings: string[];
+  disqualificationReason?: string;
+  isRecommended: boolean;
+  isDisqualified: boolean;
+  route: RouteOption;
+}
+
+export interface HospitalOverrideAudit {
+  incidentId: string;
+  hospitalId: string;
+  reason: string;
+  operator: string;
+  at: string;
+}
+
 export interface ReliefCenter {
   id: string;
   name: string;
@@ -184,6 +231,17 @@ export interface RouteOption {
   path: GeoPoint[];
   recommended: boolean;
   reason: string;
+  routeStatus?: "safe" | "caution" | "high_risk" | "blocked";
+  affectedZones?: string[];
+  affectedRoads?: string[];
+  routeSource?: "osrm" | "fallback";
+  steps?: RouteStep[];
+}
+
+export interface RouteStep {
+  instruction: string;
+  distanceKm: number;
+  durationMinutes: number;
 }
 
 export interface DroneMission {

@@ -4,6 +4,8 @@ import type {
   EmergencyResource,
   GeoPoint,
   Hospital,
+  HospitalRecommendationResult,
+  HospitalRecommendationWeights,
   Incident,
   RoadSegment,
   RouteOption,
@@ -77,9 +79,18 @@ export function riskLabel(score: number) {
   return { label: "Safe", tone: "safe" as const };
 }
 
-export interface HospitalRecommendation {
-  hospital: Hospital;
-  distanceKm: number;
+export const hospitalRecommendationWeights: HospitalRecommendationWeights = {
+  distanceWeight: 0.18,
+  travelTimeWeight: 0.14,
+  accessibilityWeight: 0.16,
+  disasterRiskWeight: 0.14,
+  operationalStatusWeight: 0.14,
+  emergencyCapacityWeight: 0.14,
+  routeReliabilityWeight: 0.1,
+};
+
+export interface HospitalRecommendation extends HospitalRecommendationResult {
+  /** Compatibility fields retained for existing panels and services. */
   riskScore: number;
   hazards: string[];
   capacityFree: number;
@@ -88,41 +99,131 @@ export interface HospitalRecommendation {
   reason: string;
 }
 
-/** Safe-hospital ranking: capacity + access risk, NOT raw distance. */
+function normaliseInverse(value: number, max: number) {
+  return Math.round(Math.max(0, Math.min(100, 100 - (value / Math.max(max, 0.1)) * 100)));
+}
+
+function routeStatusForRisk(score: number): HospitalRecommendationResult["routeStatus"] {
+  if (score >= 75) return "blocked";
+  if (score >= 35) return "caution";
+  return "safe";
+}
+
+/** Transparent, deterministic safe-hospital ranking. Higher total scores are safer. */
 export function rankHospitals(
   origin: GeoPoint,
   hospitals: Hospital[],
   roads: RoadSegment[],
   zones: DisasterZone[],
+  scenario?: { active: boolean; floodSeverity: number },
 ): HospitalRecommendation[] {
-  const scored = hospitals.map((hospital) => {
+  const scored = hospitals.map((hospital): HospitalRecommendation => {
     const distanceKm = haversineKm(origin, hospital.location);
-    const { score: baseRisk, hazards } = routeRisk(origin, hospital.location, roads, zones);
-    const riskScore = Math.min(100, baseRisk + (hospital.accessAffected ? 45 : 0));
+    const routeOptions = planRoutes(origin, hospital.location, roads, zones);
+    const route = [...routeOptions].sort(
+      (a, b) => a.riskScore * 2 + a.minutes - (b.riskScore * 2 + b.minutes),
+    )[0] ?? routeOptions[0];
+    const baseRisk = routeRisk(origin, hospital.location, roads, zones);
+    const riskScore = Math.min(100, Math.max(baseRisk.score, route?.riskScore ?? baseRisk.score) + (hospital.accessAffected ? 45 : 0));
+    const hazards = [...new Set([...(route?.hazards ?? []), ...baseRisk.hazards])];
     const capacityFree = hospital.emergencyBeds.total - hospital.emergencyBeds.used;
-    const capacityPenalty = hospital.status === "offline" ? 100 : hospital.status === "overloaded" ? 60 : capacityFree <= 2 ? 40 : capacityFree <= 6 ? 18 : 0;
-    const score = Math.round(distanceKm * 6 + riskScore * 0.9 + capacityPenalty);
-    return { hospital, distanceKm, riskScore, hazards, capacityFree, score, recommended: false, reason: "" };
+    const estimatedTravelTimeMinutes = route?.minutes ?? Math.max(4, Math.round(distanceKm * 2.5));
+    const routeStatus = routeStatusForRisk(riskScore);
+    const distanceScore = normaliseInverse(distanceKm, 15);
+    const travelTimeScore = normaliseInverse(estimatedTravelTimeMinutes, 45);
+    const accessibilityScore = hospital.accessAffected ? 15 : routeStatus === "blocked" ? 5 : routeStatus === "caution" ? 58 : 96;
+    const disasterRiskScore = Math.max(0, 100 - ({ low: 0, medium: 28, high: 62, critical: 92 }[hospital.floodRisk] ?? 50));
+    const operationalStatusScore = { operational: 100, limited: 62, overloaded: 25, offline: 0 }[hospital.status];
+    const emergencyCapacityScore = Math.round(Math.max(0, Math.min(100, (capacityFree / Math.max(hospital.emergencyBeds.total, 1)) * 100)));
+    const routeReliabilityScore = Math.max(0, 100 - riskScore);
+    const scoreBreakdown = {
+      distance: distanceScore,
+      travelTime: travelTimeScore,
+      accessibility: accessibilityScore,
+      disasterRisk: disasterRiskScore,
+      operationalStatus: operationalStatusScore,
+      emergencyCapacity: emergencyCapacityScore,
+      routeReliability: routeReliabilityScore,
+    };
+    const totalScore = Math.round(
+      distanceScore * hospitalRecommendationWeights.distanceWeight +
+        travelTimeScore * hospitalRecommendationWeights.travelTimeWeight +
+        accessibilityScore * hospitalRecommendationWeights.accessibilityWeight +
+        disasterRiskScore * hospitalRecommendationWeights.disasterRiskWeight +
+        operationalStatusScore * hospitalRecommendationWeights.operationalStatusWeight +
+        emergencyCapacityScore * hospitalRecommendationWeights.emergencyCapacityWeight +
+        routeReliabilityScore * hospitalRecommendationWeights.routeReliabilityWeight,
+    );
+    const isDisqualified =
+      hospital.status === "offline" ||
+      capacityFree <= 0 ||
+      routeStatus === "blocked" ||
+      (scenario?.active === true && scenario.floodSeverity >= 80 && hospital.accessAffected);
+    const disqualificationReason = hospital.status === "offline"
+      ? "Hospital is closed in the current simulation."
+      : capacityFree <= 0
+        ? "No emergency beds are currently available."
+        : routeStatus === "blocked"
+          ? "The safest available corridor is blocked or too hazardous."
+          : scenario?.active && scenario.floodSeverity >= 80 && hospital.accessAffected
+            ? "Flood scenario has made the hospital access corridor unreliable."
+            : undefined;
+    const reasons: string[] = [];
+    const warnings: string[] = [];
+    if (routeStatus === "safe") reasons.push("Safe route available with no major closure on the corridor.");
+    if (!hospital.accessAffected) reasons.push("Primary hospital access is currently clear.");
+    if (hospital.status === "operational") reasons.push("Emergency department is operational.");
+    if (capacityFree > 0) reasons.push(`${capacityFree} emergency bed${capacityFree === 1 ? "" : "s"} available.`);
+    if (hospital.floodRisk === "low") reasons.push("Hospital has low disaster exposure.");
+    if (hospital.accessAffected) warnings.push("Primary access road is affected by flooding.");
+    if (routeStatus !== "safe") warnings.push(`Route reliability is ${routeStatus}.`);
+    if (hospital.status !== "operational") warnings.push(`Hospital status is ${hospital.status}.`);
+    if (capacityFree <= 6 && capacityFree > 0) warnings.push("Emergency capacity is limited.");
+    return {
+      hospital,
+      rank: 0,
+      totalScore,
+      distanceKm,
+      estimatedTravelTimeMinutes,
+      routeStatus,
+      disasterRisk: hospital.floodRisk,
+      operationalStatus: hospital.status,
+      emergencyCapacity: capacityFree,
+      scoreBreakdown,
+      reasons,
+      warnings,
+      disqualificationReason,
+      isRecommended: false,
+      isDisqualified,
+      route: route ?? planRoutes(origin, hospital.location, roads, zones)[0]!,
+      riskScore,
+      hazards,
+      capacityFree,
+      score: 100 - totalScore,
+      recommended: false,
+      reason: "",
+    };
   });
-  scored.sort((a, b) => a.score - b.score);
+  scored.sort((a, b) => {
+    if (a.isDisqualified !== b.isDisqualified) return a.isDisqualified ? 1 : -1;
+    return b.totalScore - a.totalScore;
+  });
   const nearest = [...scored].sort((a, b) => a.distanceKm - b.distanceKm)[0];
+  const recommended = scored.find((item) => !item.isDisqualified);
   return scored.map((item, index) => {
-    const recommended = index === 0 && item.hospital.status !== "offline";
-    let reason: string;
-    if (item.hospital.status === "offline") {
-      reason = "Facility reported non-operational in the simulation.";
-    } else if (item.hospital.accessAffected) {
-      reason = "Primary access road is flood affected — arrival time is unreliable.";
-    } else if (item.capacityFree <= 2) {
-      reason = "Emergency capacity nearly exhausted; risk of diversion on arrival.";
-    } else if (recommended && nearest && nearest.hospital.id !== item.hospital.id) {
-      reason = `Recommended: ${nearest.hospital.name} is closer (${nearest.distanceKm} km) but its access is compromised. This route is safer with emergency capacity available.`;
-    } else if (recommended) {
-      reason = "Closest facility that is operational with safe access and available emergency capacity.";
-    } else {
-      reason = "Operational alternative — longer travel time than the recommended facility.";
-    }
-    return { ...item, recommended, reason };
+    const isRecommended = item.hospital.id === recommended?.hospital.id;
+    const reason = item.isDisqualified
+      ? item.disqualificationReason ?? "Not suitable for emergency routing."
+      : isRecommended && nearest && nearest.hospital.id !== item.hospital.id
+        ? `${nearest.hospital.name} is closer (${nearest.distanceKm} km), but this hospital has a safer, more reliable corridor and better emergency readiness.`
+        : item.reasons[0] ?? "Operational alternative for emergency intake.";
+    return {
+      ...item,
+      rank: index + 1,
+      isRecommended,
+      recommended: isRecommended,
+      reason,
+    };
   });
 }
 
@@ -276,8 +377,9 @@ export function deriveRecommendations(args: {
   roads: RoadSegment[];
   zones: DisasterZone[];
   now: string;
+  scenario?: { active: boolean; floodSeverity: number };
 }): AiRecommendation[] {
-  const { incidents, resources, hospitals, roads, zones, now } = args;
+  const { incidents, resources, hospitals, roads, zones, now, scenario } = args;
   const out: AiRecommendation[] = [];
 
   const ranked = prioritise(incidents, resources, roads, zones).filter(
@@ -330,7 +432,7 @@ export function deriveRecommendations(args: {
       });
     }
     if (h.accessAffected) {
-      const alt = rankHospitals(h.location, hospitals.filter((x) => x.id !== h.id), roads, zones)[0];
+      const alt = rankHospitals(h.location, hospitals.filter((x) => x.id !== h.id), roads, zones, scenario)[0];
       out.push({
         id: `AI-ACC-${h.id}`,
         kind: "hospital_routing",

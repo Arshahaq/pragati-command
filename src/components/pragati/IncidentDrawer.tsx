@@ -1,6 +1,10 @@
+import { useEffect, useState } from "react";
 import { usePragati } from "@/lib/pragati/store";
+import { useAuth } from "@/lib/AuthProvider";
 import { haversineKm, rankHospitals, routeRisk, riskLabel } from "@/lib/pragati/logic";
 import { SeverityBadge, StatusPill, clockTime, timeAgo } from "./primitives";
+import { MapCanvas } from "./MapCanvas";
+import { routingService } from "@/lib/pragati/services";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { toast } from "sonner";
 import { Camera } from "lucide-react";
@@ -132,22 +136,58 @@ export function IncidentDrawer({
 
 function NearestBlock({ incidentId }: { incidentId: string }) {
   const { state } = usePragati();
+  const { user } = useAuth();
+  const [selectedHospitalId, setSelectedHospitalId] = useState<string | null>(null);
+  const [overrideReason, setOverrideReason] = useState("");
+  const [liveRoutes, setLiveRoutes] = useState<import("@/lib/pragati/types").RouteOption[]>([]);
   const incident = state.incidents.find((i) => i.id === incidentId);
+  const hospitals = incident ? rankHospitals(incident.location, state.hospitals, state.roads, state.zones, {
+    active: state.scenarioActive,
+    floodSeverity: state.whatIf.floodSeverity,
+  }) : [];
+  const best = hospitals.find((hospital) => hospital.isRecommended);
+  const selected = hospitals.find((hospital) => hospital.hospital.id === (selectedHospitalId ?? best?.hospital.id));
+  const override = incident ? state.hospitalOverrides.find((audit) => audit.incidentId === incident.id && audit.hospitalId === selected?.hospital.id) : undefined;
+  useEffect(() => {
+    let active = true;
+    if (!incident || !selected) return () => {
+      active = false;
+    };
+    routingService.getRoutes(incident.location, selected.hospital.location, state.roads, state.zones).then((routes) => {
+      if (active) setLiveRoutes(routes);
+    });
+    return () => {
+      active = false;
+    };
+  }, [incident?.id, selected?.hospital.id, state.roads, state.zones]);
+  const liveRoute = liveRoutes.find((route) => route.recommended) ?? selected?.route;
   if (!incident) return null;
-  const hospitals = rankHospitals(incident.location, state.hospitals, state.roads, state.zones);
-  const best = hospitals[0];
   const team = [...state.resources]
     .filter((r) => r.status === "available")
     .sort((a, b) => haversineKm(a.location, incident.location) - haversineKm(b.location, incident.location))[0];
-  const risk = best ? routeRisk(incident.location, best.hospital.location, state.roads, state.zones) : null;
+  const risk = selected ? routeRisk(incident.location, selected.hospital.location, state.roads, state.zones) : null;
 
   return (
     <Block title="PRAGATI recommendation">
+      {selected && (
+        <>
+          <div className="mb-3 rounded-lg border border-forest/40 bg-forest/8 p-3">
+            <p className="label-eyebrow text-forest">Safest recommended hospital</p>
+            <p className="mt-1 text-sm font-semibold text-foreground">{selected.hospital.name}</p>
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              <StatusPill tone="safe">Score {selected.totalScore}/100</StatusPill>
+              <StatusPill tone={selected.routeStatus === "safe" ? "safe" : selected.routeStatus === "caution" ? "warning" : "critical"}>Route {selected.routeStatus}</StatusPill>
+              <StatusPill tone={selected.emergencyCapacity > 4 ? "safe" : "warning"}>{selected.emergencyCapacity} beds free</StatusPill>
+            </div>
+          </div>
+          {liveRoute && <MapCanvas className="mb-3 min-h-[240px]" origin={incident.location} routes={[liveRoute]} compact />}
+        </>
+      )}
       <Rows
         rows={[
           {
             label: "Recommended hospital",
-            value: best ? `${best.hospital.name} · ${best.distanceKm} km · ${best.capacityFree} beds free` : "—",
+            value: best ? `${best.hospital.name} · ${best.distanceKm} km · ${best.emergencyCapacity} beds free` : "No eligible hospital",
           },
           {
             label: "Nearest available resource",
@@ -155,7 +195,7 @@ function NearestBlock({ incidentId }: { incidentId: string }) {
           },
           {
             label: "Route risk",
-            value: risk ? `${risk.score}/100 · ${riskLabel(risk.score).label}` : "—",
+            value: liveRoute ? `${liveRoute.routeStatus?.replace("_", " ") ?? "analyzed"} · ${liveRoute.minutes} min` : risk ? `${risk.score}/100 · ${riskLabel(risk.score).label}` : "—",
           },
           {
             label: "Hazards on corridor",
@@ -163,7 +203,46 @@ function NearestBlock({ incidentId }: { incidentId: string }) {
           },
         ]}
       />
-      {best && <p className="mt-2 text-xs leading-relaxed text-muted-foreground">{best.reason}</p>}
+      {selected && (
+        <>
+          <div className="mt-3 space-y-1 text-xs">
+            {selected.reasons.map((reason) => <p key={reason} className="text-foreground">• {reason}</p>)}
+            {selected.warnings.map((warning) => <p key={warning} className="text-warning">Warning: {warning}</p>)}
+          </div>
+          <div className="mt-4 border-t border-border pt-3">
+            <p className="label-eyebrow mb-2">Alternative hospitals</p>
+            <div className="space-y-2">
+              {hospitals.filter((hospital) => !hospital.isRecommended).slice(0, 3).map((hospital) => (
+                <div key={hospital.hospital.id} className="flex items-center justify-between gap-2 rounded-md border border-border px-2.5 py-2 text-xs">
+                  <span className="min-w-0 truncate text-foreground">{hospital.hospital.name} · {hospital.distanceKm} km</span>
+                  <button type="button" onClick={() => setSelectedHospitalId(hospital.hospital.id)} className="shrink-0 text-primary hover:underline">Select</button>
+                </div>
+              ))}
+            </div>
+          </div>
+          {selectedHospitalId && selectedHospitalId !== best?.hospital.id && !override && (
+            <div className="mt-3 space-y-2 rounded-md border border-saffron/35 bg-saffron/8 p-3">
+              <p className="text-xs font-semibold text-foreground">Override recommendation</p>
+              <textarea value={overrideReason} onChange={(event) => setOverrideReason(event.target.value)} placeholder="Reason required for audit trail" className="min-h-16 w-full rounded-md border border-border bg-background px-2.5 py-2 text-xs text-foreground outline-none focus:border-primary" />
+              <button type="button" disabled={overrideReason.trim().length < 8} onClick={() => {
+                dispatch({
+                  type: "recordHospitalOverride",
+                  audit: {
+                    incidentId: incident.id,
+                    hospitalId: selected.hospital.id,
+                    reason: overrideReason.trim(),
+                    operator: user?.name ?? "Government operator",
+                    at: new Date().toISOString(),
+                  },
+                });
+                setOverrideReason("");
+                toast.success("Hospital override recorded for audit");
+              }} className="rounded-md bg-saffron px-2.5 py-1.5 text-xs font-semibold text-slate-950 disabled:opacity-50">Record override</button>
+            </div>
+          )}
+          {override && <p className="mt-3 text-[11px] text-saffron">Override recorded for {selected.hospital.name} by {override.operator} at {clockTime(override.at)}: {override.reason}</p>}
+        </>
+      )}
     </Block>
   );
 }

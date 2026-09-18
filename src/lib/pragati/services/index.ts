@@ -27,7 +27,8 @@ import {
   seedRoads,
   seedZones,
 } from "../seed";
-import { planRoutes, rankHospitals, deriveRecommendations, prioritise } from "../logic";
+import { rankHospitals, deriveRecommendations, prioritise } from "../logic";
+import { routingService as roadRoutingService } from "../routingService";
 import type {
   AiRecommendation,
   DisasterZone,
@@ -54,7 +55,7 @@ export interface ServiceMeta {
 
 export const serviceRegistry: ServiceMeta[] = [
   { name: "weatherService", mode: "mock", provider: "IMD / OpenWeather", envVars: ["WEATHER_API_KEY"], description: "Rainfall, wind and flood advisories per ward." },
-  { name: "routingService", mode: "mock", provider: "Mapbox Directions / OSRM", envVars: ["ROUTING_API_KEY"], description: "Multi-option routing with hazard-weighted costs." },
+  { name: "routingService", mode: "live", provider: "OSRM / OpenStreetMap", envVars: [], description: "Road-following routes with deterministic safety fallback." },
   { name: "geocodingService", mode: "mock", provider: "MapmyIndia / Nominatim", envVars: ["GEOCODING_API_KEY"], description: "Address ⇄ coordinate resolution for citizen reports." },
   { name: "gisService", mode: "mock", provider: "Bhuvan / State GIS", envVars: ["GIS_BASE_URL"], description: "Flood polygons, terrain and disaster zone layers." },
   { name: "hospitalService", mode: "mock", provider: "HMIS / District registry", envVars: ["HMIS_BASE_URL", "HMIS_TOKEN"], description: "Facility status, bed and ICU capacity." },
@@ -88,9 +89,7 @@ export const weatherService = {
 };
 
 export const routingService = {
-  async getRoutes(from: GeoPoint, to: GeoPoint, roads: RoadSegment[], zones: DisasterZone[]): Promise<RouteOption[]> {
-    return ok(planRoutes(from, to, roads, zones));
-  },
+  getRoutes: roadRoutingService.getRoutes,
 };
 
 export const geocodingService = {
@@ -112,8 +111,14 @@ export const hospitalService = {
   async list(): Promise<Hospital[]> {
     return ok(seedHospitals);
   },
-  async rankSafe(origin: GeoPoint, hospitals: Hospital[], roads: RoadSegment[], zones: DisasterZone[]) {
-    return ok(rankHospitals(origin, hospitals, roads, zones));
+  async rankSafe(
+    origin: GeoPoint,
+    hospitals: Hospital[],
+    roads: RoadSegment[],
+    zones: DisasterZone[],
+    scenario?: { active: boolean; floodSeverity: number },
+  ) {
+    return ok(rankHospitals(origin, hospitals, roads, zones, scenario));
   },
 };
 
